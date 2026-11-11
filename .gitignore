@@ -1,0 +1,6 @@
+# Build output - the exe ships as a GitHub Release asset, not in the repo
+*.exe
+*.zip
+*.pdb
+bin/
+obj/
