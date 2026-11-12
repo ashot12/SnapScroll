@@ -34,12 +34,18 @@ SCROLLING CAPTURE  (Shift+PrtSc, or press S on the capture screen, or tray menu)
   - Size limit: 30,000 px, about 30 screens on a 1080p monitor.
 
 EDITOR (markup)
-  B  Box         A  Arrow       H  Highlight (yellow)
-  T  Text (click, type, Enter; Shift+Enter = new line)
-  R  Redact (black box to hide passwords, emails, etc.)
-  Color / line width / text size are on the toolbar.
+  Everything you draw stays a separate object until you save/copy: select it,
+  drag it, recolor it or delete it.
+  V  Select      click to select, drag to move, Del to delete, arrows to nudge
+                 double-click text to edit it
+  B  Box         A  Arrow       P  Pen (freehand)      H  Highlight (yellow)
+  T  Text        drag an area and type; it wraps inside. Enter = new line,
+                 click outside or Ctrl+Enter = done, Esc = cancel
+  C  Checkmark   X  X mark      click to stamp, or drag to size
+  R  Redact      black box to hide passwords, emails, etc.
+  Color / line width / text size apply to new objects and to the selected one.
   Ctrl+Z undo   Ctrl+Y redo   Ctrl+C copy   Ctrl+S save   Ctrl+Shift+S save as
-  Ctrl +/-/0 zoom          Esc close
+  Ctrl +/-/0 zoom          Esc deselect / close
 
 TROUBLESHOOTING
   - Windows 11 Snipping Tool opens instead: Settings > Accessibility > Keyboard >

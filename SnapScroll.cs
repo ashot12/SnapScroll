@@ -17,9 +17,9 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("SnapScroll")]
 [assembly: AssemblyProduct("SnapScroll")]
-[assembly: AssemblyVersion("0.1.1.0")]
-[assembly: AssemblyFileVersion("0.1.1.0")]
-[assembly: AssemblyInformationalVersion("0.1.1-beta")]
+[assembly: AssemblyVersion("0.2.0.0")]
+[assembly: AssemblyFileVersion("0.2.0.0")]
+[assembly: AssemblyInformationalVersion("0.2.0-beta")]
 
 namespace SnapScroll
 {
@@ -1260,16 +1260,33 @@ namespace SnapScroll
     }
 
     // ------------------------------------------------------------ Markup editor
-    enum Tool { Box, Arrow, Highlight, Text, Redact }
+    enum Tool { Select, Box, Arrow, Pencil, Highlight, Text, Check, Cross, Redact }
 
     class Shape
     {
         public Tool Kind;
-        public Point A, B;
+        public Point A, B;            // corners. Text: A = top-left, B.X = right edge, B.Y = bottom of the text
         public Color Color;
         public float Width;
         public string Text;
         public float FontSize;
+        public int AreaH;             // Text: height of the area the user drew
+        public List<Point> Pts;       // Pencil stroke
+
+        public Shape Clone()
+        {
+            var c = (Shape)MemberwiseClone();
+            if (Pts != null) c.Pts = new List<Point>(Pts);
+            return c;
+        }
+
+        public void Offset(int dx, int dy)
+        {
+            A.Offset(dx, dy);
+            B.Offset(dx, dy);
+            if (Pts != null)
+                for (int i = 0; i < Pts.Count; i++) { Point q = Pts[i]; q.Offset(dx, dy); Pts[i] = q; }
+        }
     }
 
     class Canvas : Panel
@@ -1282,9 +1299,15 @@ namespace SnapScroll
 
     class EditorForm : Form
     {
+        static readonly Color CheckGreen = Color.FromArgb(22, 163, 74);
+        static readonly Color CrossRed = Color.FromArgb(232, 30, 37);
+        const int StampSize = 40;
+        const int MaxUndo = 100;
+
         readonly Bitmap img;
-        readonly List<Shape> shapes = new List<Shape>();
-        readonly List<Shape> redo = new List<Shape>();
+        List<Shape> shapes = new List<Shape>();
+        readonly List<List<Shape>> undo = new List<List<Shape>>();
+        readonly List<List<Shape>> redo = new List<List<Shape>>();
         readonly Dictionary<Tool, ToolStripButton> toolButtons = new Dictionary<Tool, ToolStripButton>();
         Tool tool = Tool.Box;
         Color color = Color.FromArgb(232, 30, 37);
@@ -1295,15 +1318,26 @@ namespace SnapScroll
         bool dirty = true;
         bool suppress;
         string savedPath;
-        Shape cur;
-        TextBox editBox;
-        Point editPos;
+
+        Shape cur;                    // shape being drawn
+        Shape selected;               // selected object (movable / deletable)
+        bool moving, moved;
+        Point moveLast;
+        List<Shape> preMove;          // undo snapshot taken when a move starts
+
+        TextBox editBox;              // text being typed
+        Shape editShape;
+        bool editIsNew;
+        Color editColor;
+        float editFont;
+        int editBoxW;
 
         readonly ToolStrip ts;
         readonly Panel host;
         readonly Canvas canvas;
         ToolStripDropDownButton colorBtn;
-        ToolStripComboBox zoomBox;
+        ToolStripComboBox zoomBox, widthBox, fontBox;
+        ToolStripButton deleteBtn;
         ToolStripLabel statusLbl;
 
         static readonly string[] ZoomItems = { "Fit width", "25%", "50%", "75%", "100%", "150%", "200%" };
@@ -1323,15 +1357,19 @@ namespace SnapScroll
             ts.Padding = new Padding(6, 3, 6, 3);
             ts.RenderMode = ToolStripRenderMode.System;
 
+            AddToolButton(Tool.Select, "\u2196 Select", "Select (V): click an object to select it, drag to move, Delete to remove.\nDouble-click text to edit it. Arrow keys nudge.", Color.Empty);
             AddToolButton(Tool.Box, "\u25A1 Box", "Rectangle outline (B)", Color.Empty);
-            AddToolButton(Tool.Arrow, "\u2197 Arrow", "Arrow (A)", Color.Empty);
+            AddToolButton(Tool.Arrow, "\u2197 Arrow", "Arrow (A): drag from tail to tip", Color.Empty);
+            AddToolButton(Tool.Pencil, "\u270E Pen", "Freehand pen (P)", Color.Empty);
             AddToolButton(Tool.Highlight, "\u2588 Highlight", "Yellow highlighter (H)", Color.Goldenrod);
-            AddToolButton(Tool.Text, "T  Text", "Text (T) - click to place, Enter to finish, Shift+Enter for new line", Color.Empty);
+            AddToolButton(Tool.Text, "T Text", "Text (T): drag an area, then type. Text wraps inside it.\nEnter = new line, click outside or Ctrl+Enter = done, Esc = cancel.\nClick existing text to edit it.", Color.Empty);
+            AddToolButton(Tool.Check, "\u2714", "Checkmark (C): click to place, or drag to size", CheckGreen);
+            AddToolButton(Tool.Cross, "\u2716", "X mark (X): click to place, or drag to size", CrossRed);
             AddToolButton(Tool.Redact, "\u25A0 Redact", "Black-out box to hide info (R)", Color.Empty);
             ts.Items.Add(new ToolStripSeparator());
 
             colorBtn = new ToolStripDropDownButton("Color");
-            colorBtn.ToolTipText = "Color for boxes, arrows and text";
+            colorBtn.ToolTipText = "Color for new objects, or for the selected object";
             AddColor("Red", Color.FromArgb(232, 30, 37));
             AddColor("Orange", Color.FromArgb(255, 140, 0));
             AddColor("Yellow", Color.FromArgb(255, 214, 0));
@@ -1353,18 +1391,20 @@ namespace SnapScroll
             ts.Items.Add(colorBtn);
 
             ts.Items.Add(new ToolStripLabel("Line"));
-            var widthBox = MakeCombo(new[] { "2", "3", "5", "8" }, "3", 45);
-            widthBox.SelectedIndexChanged += delegate { penWidth = float.Parse(widthBox.Text); host.Focus(); };
+            widthBox = MakeCombo(new[] { "2", "3", "5", "8" }, "3", 45);
+            widthBox.SelectedIndexChanged += delegate { SetPenWidth(float.Parse(widthBox.Text)); host.Focus(); };
             ts.Items.Add(widthBox);
 
             ts.Items.Add(new ToolStripLabel("Text"));
-            var fontBox = MakeCombo(new[] { "16", "22", "30", "44", "60" }, "22", 45);
-            fontBox.SelectedIndexChanged += delegate { fontSize = float.Parse(fontBox.Text); host.Focus(); };
+            fontBox = MakeCombo(new[] { "16", "22", "30", "44", "60" }, "22", 45);
+            fontBox.SelectedIndexChanged += delegate { SetFontSize(float.Parse(fontBox.Text)); };
             ts.Items.Add(fontBox);
 
             ts.Items.Add(new ToolStripSeparator());
             AddButton("\u21B6 Undo", "Undo (Ctrl+Z)", delegate { Undo(); });
             AddButton("\u21B7 Redo", "Redo (Ctrl+Y)", delegate { Redo(); });
+            deleteBtn = AddButton("Delete", "Delete the selected object (Del)", delegate { DeleteSelected(); });
+            deleteBtn.Enabled = false;
             ts.Items.Add(new ToolStripSeparator());
 
             zoomBox = MakeCombo(ZoomItems, "100%", 80);
@@ -1379,12 +1419,11 @@ namespace SnapScroll
             ts.Items.Add(zoomBox);
 
             var saveAs = AddButton("Save as...", "Save as (Ctrl+Shift+S)", delegate { SaveAs(); });
-            var save = AddButton("\u1F4BE Save", "Save to screenshots folder (Ctrl+S)", delegate { Save(); });
+            var save = AddButton("\uD83D\uDCBE Save", "Save to screenshots folder (Ctrl+S)", delegate { Save(); });
             var copy = AddButton("\u29C9 Copy", "Copy to clipboard (Ctrl+C)", delegate { Copy(); });
             copy.Font = new Font(Font, FontStyle.Bold);
             statusLbl = new ToolStripLabel("");
             statusLbl.ForeColor = Color.FromArgb(22, 130, 60);
-            statusLbl.IsLink = false;
             statusLbl.Click += delegate { if (savedPath != null) ImageUtil.ShowInFolder(savedPath); };
             foreach (ToolStripItem it in new ToolStripItem[] { copy, save, saveAs, statusLbl }) it.Alignment = ToolStripItemAlignment.Right;
             ts.Items.Remove(saveAs); ts.Items.Remove(save); ts.Items.Remove(copy);
@@ -1474,6 +1513,9 @@ namespace SnapScroll
             return b;
         }
 
+        static bool UsesColor(Shape s) { return s.Kind != Tool.Highlight && s.Kind != Tool.Redact; }
+        static bool UsesWidth(Shape s) { return s.Kind == Tool.Box || s.Kind == Tool.Arrow || s.Kind == Tool.Pencil; }
+
         void SetColor(Color c)
         {
             color = c;
@@ -1481,7 +1523,51 @@ namespace SnapScroll
             colorBtn.Image = Swatch(c);
             colorBtn.DisplayStyle = ToolStripItemDisplayStyle.ImageAndText;
             if (old != null) old.Dispose();
-            if (editBox != null) editBox.ForeColor = c;
+            if (editBox != null)
+            {
+                editColor = c;
+                editBox.ForeColor = c;
+                editBox.BackColor = IsLight(c) ? Color.FromArgb(70, 70, 70) : Color.White;
+                editBox.Focus();
+            }
+            else if (selected != null && UsesColor(selected) && selected.Color != c)
+            {
+                PushUndo();
+                selected.Color = c;
+                InvalidateVisible();
+            }
+        }
+
+        void SetPenWidth(float w)
+        {
+            penWidth = w;
+            if (selected != null && UsesWidth(selected) && selected.Width != w)
+            {
+                PushUndo();
+                selected.Width = w;
+                InvalidateVisible();
+            }
+        }
+
+        void SetFontSize(float f)
+        {
+            fontSize = f;
+            if (editBox != null)
+            {
+                editFont = f;
+                editBox.Font = new Font("Segoe UI", Math.Max(6f, f * zoom), FontStyle.Bold, GraphicsUnit.Pixel);
+                SizeEditBox();
+                editBox.Focus();
+                return;
+            }
+            if (selected != null && selected.Kind == Tool.Text && selected.FontSize != f)
+            {
+                PushUndo();
+                selected.FontSize = f;
+                UpdateTextBounds(selected);
+                InvalidateVisible();
+            }
+            host.Focus();
         }
 
         void SetTool(Tool t)
@@ -1489,10 +1575,88 @@ namespace SnapScroll
             CommitText();
             tool = t;
             foreach (var kv in toolButtons) kv.Value.Checked = kv.Key == t;
-            canvas.Cursor = t == Tool.Text ? Cursors.IBeam : Cursors.Cross;
+            if (t != Tool.Select) Select(null);
+            canvas.Cursor = ToolCursor();
+        }
+
+        Cursor ToolCursor()
+        {
+            if (tool == Tool.Select) return Cursors.Default;
+            if (tool == Tool.Text) return Cursors.IBeam;
+            return Cursors.Cross;
+        }
+
+        void Select(Shape s)
+        {
+            if (selected == s) return;
+            selected = s;
+            deleteBtn.Enabled = s != null;
+            InvalidateVisible();
         }
 
         void SetStatus(string s) { statusLbl.Text = s; }
+
+        // ---- undo: snapshots of the object list
+        static List<Shape> CloneList(List<Shape> l)
+        {
+            var r = new List<Shape>(l.Count);
+            foreach (var s in l) r.Add(s.Clone());
+            return r;
+        }
+
+        void PushUndo() { PushUndoSnapshot(CloneList(shapes)); }
+
+        void PushUndoSnapshot(List<Shape> snap)
+        {
+            undo.Add(snap);
+            if (undo.Count > MaxUndo) undo.RemoveAt(0);
+            redo.Clear();
+            dirty = true;
+            SetStatus("");
+        }
+
+        void Undo()
+        {
+            CommitText();
+            if (undo.Count == 0) return;
+            redo.Add(shapes);
+            shapes = undo[undo.Count - 1];
+            undo.RemoveAt(undo.Count - 1);
+            selected = null;
+            deleteBtn.Enabled = false;
+            dirty = true;
+            InvalidateVisible();
+        }
+
+        void Redo()
+        {
+            CommitText();
+            if (redo.Count == 0) return;
+            undo.Add(shapes);
+            shapes = redo[redo.Count - 1];
+            redo.RemoveAt(redo.Count - 1);
+            selected = null;
+            deleteBtn.Enabled = false;
+            dirty = true;
+            InvalidateVisible();
+        }
+
+        void DeleteSelected()
+        {
+            if (selected == null) return;
+            PushUndo();
+            shapes.Remove(selected);
+            Select(null);
+            InvalidateVisible();
+        }
+
+        void Nudge(int dx, int dy)
+        {
+            if (selected == null) return;
+            PushUndo();
+            selected.Offset(dx, dy);
+            InvalidateVisible();
+        }
 
         // ---- zoom
         void SetZoom(float z, bool fit)
@@ -1535,7 +1699,7 @@ namespace SnapScroll
             else { for (int i = steps.Length - 1; i >= 0; i--) if (steps[i] < z - 0.001f) { SetZoom(steps[i], false); return; } }
         }
 
-        // ---- coordinates
+        // ---- geometry
         Point ToImg(Point p)
         {
             int x = (int)Math.Round(p.X / zoom), y = (int)Math.Round(p.Y / zoom);
@@ -1547,13 +1711,39 @@ namespace SnapScroll
             return Rectangle.FromLTRB(Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Max(a.X, b.X), Math.Max(a.Y, b.Y));
         }
 
+        static Rectangle GeomRect(Shape s)
+        {
+            if (s.Kind == Tool.Pencil && s.Pts != null && s.Pts.Count > 0)
+            {
+                int x0 = int.MaxValue, y0 = int.MaxValue, x1 = int.MinValue, y1 = int.MinValue;
+                foreach (var q in s.Pts)
+                {
+                    if (q.X < x0) x0 = q.X; if (q.Y < y0) y0 = q.Y;
+                    if (q.X > x1) x1 = q.X; if (q.Y > y1) y1 = q.Y;
+                }
+                return Rectangle.FromLTRB(x0, y0, x1, y1);
+            }
+            return Rect(s.A, s.B);
+        }
+
+        static Rectangle SelRect(Shape s)
+        {
+            Rectangle r = GeomRect(s);
+            int pad = s.Kind == Tool.Text ? 4 : (int)Math.Ceiling(s.Width / 2) + 4;
+            if (s.Kind == Tool.Arrow) pad += (int)Math.Ceiling(Math.Max(7f, s.Width * 2));
+            r.Inflate(pad, pad);
+            return r;
+        }
+
         Rectangle CanvasBounds(Shape s)
         {
-            Rectangle r = Rect(s.A, s.B);
-            int pad = (int)(s.Width * 6 + 8);
+            Rectangle r = GeomRect(s);
+            int pad = (int)Math.Ceiling(s.Width * 5) + 12;
+            if (s.Kind == Tool.Text) pad = (int)(s.FontSize / 4) + 12;
+            if (s.Kind == Tool.Check || s.Kind == Tool.Cross) pad = Math.Min(r.Width, r.Height) / 6 + 14;
             r.Inflate(pad, pad);
-            return new Rectangle((int)Math.Floor(r.X * zoom), (int)Math.Floor(r.Y * zoom),
-                                 (int)Math.Ceiling(r.Width * zoom) + 2, (int)Math.Ceiling(r.Height * zoom) + 2);
+            return new Rectangle((int)Math.Floor(r.X * zoom) - 4, (int)Math.Floor(r.Y * zoom) - 4,
+                                 (int)Math.Ceiling(r.Width * zoom) + 10, (int)Math.Ceiling(r.Height * zoom) + 10);
         }
 
         Rectangle VisibleCanvasRect()
@@ -1562,6 +1752,62 @@ namespace SnapScroll
         }
 
         void InvalidateVisible() { canvas.Invalidate(VisibleCanvasRect()); }
+
+        static double DistSeg(Point p, Point a, Point b)
+        {
+            double dx = b.X - a.X, dy = b.Y - a.Y, len = dx * dx + dy * dy;
+            double t = len == 0 ? 0 : ((p.X - a.X) * dx + (p.Y - a.Y) * dy) / len;
+            t = Math.Max(0, Math.Min(1, t));
+            double x = a.X + t * dx - p.X, y = a.Y + t * dy - p.Y;
+            return Math.Sqrt(x * x + y * y);
+        }
+
+        static bool Hit(Shape s, Point p, float tol)
+        {
+            switch (s.Kind)
+            {
+                case Tool.Box:
+                    {
+                        // Outline only, so things inside a box stay clickable.
+                        Rectangle r = Rect(s.A, s.B);
+                        int t = (int)Math.Ceiling(tol + s.Width / 2);
+                        Rectangle outer = r; outer.Inflate(t, t);
+                        Rectangle inner = r; inner.Inflate(-t, -t);
+                        return outer.Contains(p) && (inner.Width <= 0 || inner.Height <= 0 || !inner.Contains(p));
+                    }
+                case Tool.Arrow:
+                    return DistSeg(p, s.A, s.B) <= tol + s.Width / 2 + 2;
+                case Tool.Pencil:
+                    if (s.Pts == null || s.Pts.Count == 0) return false;
+                    if (s.Pts.Count == 1) return DistSeg(p, s.Pts[0], s.Pts[0]) <= tol + s.Width / 2;
+                    for (int i = 1; i < s.Pts.Count; i++)
+                        if (DistSeg(p, s.Pts[i - 1], s.Pts[i]) <= tol + s.Width / 2) return true;
+                    return false;
+                default:
+                    {
+                        Rectangle r = Rect(s.A, s.B);
+                        r.Inflate((int)tol, (int)tol);
+                        return r.Contains(p);
+                    }
+            }
+        }
+
+        Shape HitTest(Point p)
+        {
+            float tol = Math.Max(3f, 6f / zoom);
+            for (int i = shapes.Count - 1; i >= 0; i--)
+            {
+                var s = shapes[i];
+                if (s != editShape && Hit(s, p, tol)) return s;
+            }
+            // Nothing under the pointer: clicking inside a box selects the box.
+            for (int i = shapes.Count - 1; i >= 0; i--)
+            {
+                var s = shapes[i];
+                if (s.Kind == Tool.Box && s != editShape && Rect(s.A, s.B).Contains(p)) return s;
+            }
+            return null;
+        }
 
         // ---- painting
         void Canvas_Paint(object sender, PaintEventArgs e)
@@ -1586,8 +1832,20 @@ namespace SnapScroll
             g.PixelOffsetMode = PixelOffsetMode.Default;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             g.ScaleTransform(zoom, zoom);
-            foreach (var s in shapes) DrawShape(g, s);
-            if (cur != null) DrawShape(g, cur);
+            foreach (var s in shapes) if (s != editShape) DrawShape(g, s);
+            if (cur != null)
+            {
+                if (cur.Kind == Tool.Text) DrawDashed(g, Rect(cur.A, cur.B), Color.FromArgb(0, 120, 215));
+                else DrawShape(g, cur);
+            }
+            if (selected != null && selected != editShape) DrawDashed(g, SelRect(selected), Color.FromArgb(0, 120, 215));
+        }
+
+        void DrawDashed(Graphics g, Rectangle r, Color c)
+        {
+            g.SmoothingMode = SmoothingMode.None;
+            using (var under = new Pen(Color.White, 2.5f / zoom)) g.DrawRectangle(under, r);
+            using (var p = new Pen(c, 1.5f / zoom)) { p.DashStyle = DashStyle.Dash; g.DrawRectangle(p, r); }
         }
 
         static void DrawShape(Graphics g, Shape s)
@@ -1620,16 +1878,33 @@ namespace SnapScroll
                         }
                     }
                     break;
-                case Tool.Text:
+                case Tool.Pencil:
+                    if (s.Pts == null || s.Pts.Count == 0) break;
                     g.SmoothingMode = SmoothingMode.AntiAlias;
-                    using (var path = new GraphicsPath())
+                    if (s.Pts.Count == 1)
                     {
-                        string[] lines = s.Text.Split('\n');
-                        float lineH = s.FontSize * 1.3f;
-                        for (int i = 0; i < lines.Length; i++)
-                            if (lines[i].Length > 0)
-                                path.AddString(lines[i], TextFamily, (int)FontStyle.Bold, s.FontSize,
-                                               new PointF(s.A.X, s.A.Y + i * lineH), StringFormat.GenericDefault);
+                        using (var b = new SolidBrush(s.Color))
+                            g.FillEllipse(b, s.Pts[0].X - s.Width / 2, s.Pts[0].Y - s.Width / 2, s.Width, s.Width);
+                        break;
+                    }
+                    using (var p = new Pen(s.Color, s.Width))
+                    {
+                        p.StartCap = LineCap.Round;
+                        p.EndCap = LineCap.Round;
+                        p.LineJoin = LineJoin.Round;
+                        g.DrawLines(p, s.Pts.ToArray());
+                    }
+                    break;
+                case Tool.Check:
+                case Tool.Cross:
+                    DrawStamp(g, s, r);
+                    break;
+                case Tool.Text:
+                    if (string.IsNullOrEmpty(s.Text)) break;
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    float h;
+                    using (var path = BuildTextPath(s, out h))
+                    {
                         Color outline = IsLight(s.Color) ? Color.FromArgb(40, 40, 40) : Color.White;
                         using (var op = new Pen(outline, Math.Max(2.5f, s.FontSize / 6f)) { LineJoin = LineJoin.Round })
                             g.DrawPath(op, path);
@@ -1637,6 +1912,66 @@ namespace SnapScroll
                     }
                     break;
             }
+        }
+
+        static PointF P(Rectangle r, float fx, float fy) { return new PointF(r.X + r.Width * fx, r.Y + r.Height * fy); }
+
+        static void DrawStamp(Graphics g, Shape s, Rectangle r)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float w = Math.Max(3f, Math.Min(r.Width, r.Height) / 7f);
+            PointF[][] strokes = s.Kind == Tool.Check
+                ? new[] { new[] { P(r, 0.10f, 0.55f), P(r, 0.38f, 0.85f), P(r, 0.92f, 0.15f) } }
+                : new[] { new[] { P(r, 0.15f, 0.15f), P(r, 0.85f, 0.85f) }, new[] { P(r, 0.85f, 0.15f), P(r, 0.15f, 0.85f) } };
+            Color outline = IsLight(s.Color) ? Color.FromArgb(40, 40, 40) : Color.White;
+            using (var op = new Pen(outline, w + 4))
+            using (var p = new Pen(s.Color, w))
+            {
+                foreach (var pen in new[] { op, p })
+                {
+                    pen.StartCap = LineCap.Round;
+                    pen.EndCap = LineCap.Round;
+                    pen.LineJoin = LineJoin.Round;
+                }
+                foreach (var st in strokes) g.DrawLines(op, st);
+                foreach (var st in strokes) g.DrawLines(p, st);
+            }
+        }
+
+        // ---- text layout: wraps inside the area's width, one paragraph per line break
+        static Graphics measureG;
+        static Graphics MeasureG
+        {
+            get { if (measureG == null) measureG = Graphics.FromImage(new Bitmap(1, 1)); return measureG; }
+        }
+
+        static GraphicsPath BuildTextPath(Shape s, out float height)
+        {
+            var path = new GraphicsPath();
+            float w = Math.Max(20, s.B.X - s.A.X);
+            float lineH = s.FontSize * 1.25f;
+            float y = s.A.Y;
+            using (var f = new Font(TextFamily, s.FontSize, FontStyle.Bold, GraphicsUnit.Pixel))
+            {
+                foreach (string para in (s.Text ?? "").Split('\n'))
+                {
+                    if (para.Length == 0) { y += lineH; continue; }
+                    SizeF sz = MeasureG.MeasureString(para, f, (int)w, StringFormat.GenericDefault);
+                    float ph = Math.Max(lineH, sz.Height);
+                    path.AddString(para, TextFamily, (int)FontStyle.Bold, s.FontSize,
+                                   new RectangleF(s.A.X, y, w, ph + lineH), StringFormat.GenericDefault);
+                    y += ph;
+                }
+            }
+            height = y - s.A.Y;
+            return path;
+        }
+
+        static void UpdateTextBounds(Shape s)
+        {
+            float h;
+            using (BuildTextPath(s, out h)) { }
+            s.B = new Point(s.B.X, s.A.Y + Math.Max(s.AreaH, (int)Math.Ceiling(h)));
         }
 
         static FontFamily textFamily;
@@ -1661,111 +1996,230 @@ namespace SnapScroll
             if (e.Button != MouseButtons.Left) return;
             if (editBox != null) { CommitText(); return; }
             Point p = ToImg(e.Location);
-            if (tool == Tool.Text) { StartText(p); return; }
-            cur = new Shape { Kind = tool, A = p, B = p, Color = color, Width = penWidth };
+            Shape hit = HitTest(p);
+
+            // Select tool, or grabbing the object that's already selected: select / move.
+            if (tool == Tool.Select || (hit != null && hit == selected))
+            {
+                Select(hit);
+                if (hit == null) return;
+                if (e.Clicks == 2 && hit.Kind == Tool.Text) { BeginEditText(hit, false); return; }
+                moving = true;
+                moved = false;
+                moveLast = p;
+                preMove = CloneList(shapes);
+                return;
+            }
+
+            // Text tool on existing text: edit it.
+            if (tool == Tool.Text && hit != null && hit.Kind == Tool.Text) { Select(null); BeginEditText(hit, false); return; }
+
+            Select(null);
+            cur = new Shape { Kind = tool, A = p, B = p, Color = color, Width = penWidth, FontSize = fontSize };
+            if (tool == Tool.Pencil) cur.Pts = new List<Point> { p };
+            if (tool == Tool.Check) cur.Color = CheckGreen;
+            if (tool == Tool.Cross) cur.Color = CrossRed;
         }
 
         void Canvas_MouseMove(object sender, MouseEventArgs e)
         {
-            if (cur == null) return;
-            Rectangle before = CanvasBounds(cur);
-            cur.B = ToImg(e.Location);
-            canvas.Invalidate(Rectangle.Union(before, CanvasBounds(cur)));
+            Point p = ToImg(e.Location);
+            if (moving && selected != null)
+            {
+                int dx = p.X - moveLast.X, dy = p.Y - moveLast.Y;
+                if (dx == 0 && dy == 0) return;
+                Rectangle before = CanvasBounds(selected);
+                selected.Offset(dx, dy);
+                moveLast = p;
+                moved = true;
+                canvas.Invalidate(Rectangle.Union(before, CanvasBounds(selected)));
+                return;
+            }
+            if (cur != null)
+            {
+                Rectangle before = CanvasBounds(cur);
+                if (cur.Kind == Tool.Pencil)
+                {
+                    Point last = cur.Pts[cur.Pts.Count - 1];
+                    if (Math.Abs(p.X - last.X) + Math.Abs(p.Y - last.Y) >= 2) cur.Pts.Add(p);
+                }
+                else cur.B = p;
+                canvas.Invalidate(Rectangle.Union(before, CanvasBounds(cur)));
+                return;
+            }
+            if (editBox != null || e.Button != MouseButtons.None) return;
+
+            // Hover feedback: a move cursor over things you can drag.
+            Shape hit = HitTest(p);
+            Cursor want = ToolCursor();
+            if (hit != null && (tool == Tool.Select || hit == selected)) want = Cursors.SizeAll;
+            else if (hit != null && tool == Tool.Text && hit.Kind == Tool.Text) want = Cursors.IBeam;
+            if (canvas.Cursor != want) canvas.Cursor = want;
         }
 
         void Canvas_MouseUp(object sender, MouseEventArgs e)
         {
+            if (moving)
+            {
+                moving = false;
+                if (moved) PushUndoSnapshot(preMove);
+                preMove = null;
+                return;
+            }
             if (cur == null) return;
             Shape s = cur;
             cur = null;
+            canvas.Invalidate(CanvasBounds(s));
             Rectangle r = Rect(s.A, s.B);
-            bool tiny = s.Kind == Tool.Arrow
-                ? Math.Abs(s.A.X - s.B.X) + Math.Abs(s.A.Y - s.B.Y) < 6
-                : r.Width < 3 || r.Height < 3;
-            if (!tiny) AddShape(s);
+
+            switch (s.Kind)
+            {
+                case Tool.Text:
+                    {
+                        // Drag = text area. A plain click = a default-width area.
+                        int w = r.Width >= 20 ? r.Width : Math.Min(320, Math.Max(60, img.Width - r.X));
+                        s.A = r.Location;
+                        s.AreaH = r.Height >= 10 ? r.Height : 0;
+                        s.B = new Point(r.X + w, r.Y + s.AreaH);
+                        BeginEditText(s, true);
+                        return;
+                    }
+                case Tool.Check:
+                case Tool.Cross:
+                    {
+                        int dx = s.B.X - s.A.X, dy = s.B.Y - s.A.Y;
+                        int size = Math.Max(Math.Abs(dx), Math.Abs(dy));
+                        if (size < 8)
+                        {
+                            s.A = new Point(s.A.X - StampSize / 2, s.A.Y - StampSize / 2);
+                            s.B = new Point(s.A.X + StampSize, s.A.Y + StampSize);
+                        }
+                        else s.B = new Point(s.A.X + (dx < 0 ? -size : size), s.A.Y + (dy < 0 ? -size : size));
+                        Rectangle sq = Rect(s.A, s.B);
+                        s.A = sq.Location;
+                        s.B = new Point(sq.Right, sq.Bottom);
+                        break;
+                    }
+                case Tool.Pencil:
+                    {
+                        Rectangle pr = GeomRect(s);
+                        s.A = pr.Location;
+                        s.B = new Point(pr.Right, pr.Bottom);
+                        break;
+                    }
+                case Tool.Arrow:
+                    if (Math.Abs(s.A.X - s.B.X) + Math.Abs(s.A.Y - s.B.Y) < 6) return;
+                    break;
+                default:
+                    if (r.Width < 3 || r.Height < 3) return;
+                    break;
+            }
+            PushUndo();
+            shapes.Add(s);
+            Select(s);   // freshly drawn objects can be dragged straight away
             canvas.Invalidate(CanvasBounds(s));
         }
 
-        void AddShape(Shape s)
+        // ---- text editing
+        void BeginEditText(Shape s, bool isNew)
         {
-            shapes.Add(s);
-            redo.Clear();
-            dirty = true;
-            SetStatus("");
-            canvas.Invalidate(CanvasBounds(s));
-        }
+            editShape = s;
+            editIsNew = isNew;
+            editColor = s.Color;
+            editFont = s.FontSize;
+            int w = Math.Max(40, s.B.X - s.A.X);
+            editBoxW = (int)Math.Ceiling(w * zoom) + 8;
 
-        void Undo()
-        {
-            CommitText();
-            if (shapes.Count == 0) return;
-            var s = shapes[shapes.Count - 1];
-            shapes.RemoveAt(shapes.Count - 1);
-            redo.Add(s);
-            dirty = true;
-            InvalidateVisible();
-        }
-
-        void Redo()
-        {
-            if (redo.Count == 0) return;
-            var s = redo[redo.Count - 1];
-            redo.RemoveAt(redo.Count - 1);
-            shapes.Add(s);
-            dirty = true;
-            InvalidateVisible();
-        }
-
-        // ---- text entry
-        void StartText(Point imgPt)
-        {
-            editPos = imgPt;
             editBox = new TextBox();
             editBox.Multiline = true;
+            editBox.WordWrap = true;
+            editBox.AcceptsReturn = true;
+            editBox.ScrollBars = ScrollBars.None;
             editBox.BorderStyle = BorderStyle.FixedSingle;
-            editBox.Font = new Font("Segoe UI", Math.Max(6f, fontSize * zoom), FontStyle.Bold, GraphicsUnit.Pixel);
-            editBox.ForeColor = color;
-            editBox.BackColor = IsLight(color) ? Color.FromArgb(70, 70, 70) : Color.White;
-            editBox.Location = new Point((int)(imgPt.X * zoom), (int)(imgPt.Y * zoom));
+            editBox.Font = new Font("Segoe UI", Math.Max(6f, s.FontSize * zoom), FontStyle.Bold, GraphicsUnit.Pixel);
+            editBox.ForeColor = s.Color;
+            editBox.BackColor = IsLight(s.Color) ? Color.FromArgb(70, 70, 70) : Color.White;
+            editBox.Text = (s.Text ?? "").Replace("\n", "\r\n");
+            editBox.Location = new Point((int)(s.A.X * zoom) - 4, (int)(s.A.Y * zoom) - 3);
             SizeEditBox();
             editBox.TextChanged += delegate { SizeEditBox(); };
-            editBox.KeyDown += (s, e) =>
+            editBox.KeyDown += (o, e) =>
             {
-                if (e.KeyCode == Keys.Enter && !e.Shift) { e.SuppressKeyPress = true; CommitText(); }
-                else if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; editBox.Text = ""; CommitText(); }
+                if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; CancelText(); }
+                else if (e.KeyCode == Keys.Enter && e.Control) { e.SuppressKeyPress = true; CommitText(); }
             };
             canvas.Controls.Add(editBox);
             editBox.Focus();
+            editBox.SelectionStart = editBox.Text.Length;
+            if (!isNew) InvalidateVisible();   // hide the original while it's being edited
         }
 
         void SizeEditBox()
         {
             if (editBox == null) return;
-            string t = editBox.Text.Length == 0 ? "Type here" : editBox.Text;
-            Size sz = TextRenderer.MeasureText(t + "WW", editBox.Font);
-            editBox.Size = new Size(Math.Max(80, sz.Width + 8), Math.Max(editBox.Font.Height + 8, sz.Height + 10));
+            string t = editBox.Text;
+            if (t.Length == 0 || t.EndsWith("\n")) t += "Wy";
+            Size sz = TextRenderer.MeasureText(t, editBox.Font, new Size(Math.Max(10, editBoxW - 10), int.MaxValue),
+                                               TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
+            int minH = editShape != null ? (int)(editShape.AreaH * zoom) + 6 : 0;
+            editBox.Size = new Size(editBoxW, Math.Max(minH, Math.Max(editBox.Font.Height, sz.Height) + 10));
+        }
+
+        void CancelText()
+        {
+            if (editBox == null) return;
+            var box = editBox;
+            editBox = null;
+            editShape = null;
+            canvas.Controls.Remove(box);
+            box.Dispose();
+            host.Focus();
+            InvalidateVisible();
         }
 
         void CommitText()
         {
             if (editBox == null) return;
             var box = editBox;
+            var s = editShape;
             editBox = null;
+            editShape = null;
             string t = box.Text.Replace("\r\n", "\n").TrimEnd();
             canvas.Controls.Remove(box);
             box.Dispose();
             host.Focus();
-            if (t.Length > 0)
+
+            if (editIsNew)
             {
-                var s = new Shape { Kind = Tool.Text, A = editPos, Text = t, Color = color, FontSize = fontSize, Width = 1 };
-                // Approximate bounds for invalidation
-                using (var f = new Font("Segoe UI", fontSize, FontStyle.Bold, GraphicsUnit.Pixel))
+                if (t.Length > 0)
                 {
-                    Size sz = TextRenderer.MeasureText(t, f);
-                    s.B = new Point(editPos.X + sz.Width + 10, editPos.Y + sz.Height + 10);
+                    PushUndo();
+                    s.Text = t;
+                    s.Color = editColor;
+                    s.FontSize = editFont;
+                    UpdateTextBounds(s);
+                    shapes.Add(s);
+                    selected = s;
+                    deleteBtn.Enabled = true;
                 }
-                AddShape(s);
             }
+            else if (t.Length == 0)
+            {
+                PushUndo();
+                shapes.Remove(s);
+                Select(null);
+            }
+            else if (t != s.Text || editColor != s.Color || editFont != s.FontSize)
+            {
+                PushUndo();
+                s.Text = t;
+                s.Color = editColor;
+                s.FontSize = editFont;
+                UpdateTextBounds(s);
+                selected = s;
+                deleteBtn.Enabled = true;
+            }
+            InvalidateVisible();
         }
 
         // ---- output
@@ -1823,6 +2277,7 @@ namespace SnapScroll
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             if (editBox != null && editBox.Focused) return base.ProcessCmdKey(ref msg, keyData);
+            int step = (keyData & Keys.Shift) != 0 ? 10 : 1;
             switch (keyData)
             {
                 case Keys.Control | Keys.Z: Undo(); return true;
@@ -1838,12 +2293,25 @@ namespace SnapScroll
                 case Keys.Control | Keys.Subtract: StepZoom(-1); return true;
                 case Keys.Control | Keys.D0:
                 case Keys.Control | Keys.NumPad0: SetZoom(1f, false); return true;
+                case Keys.Delete:
+                case Keys.Back: DeleteSelected(); return true;
+                case Keys.Left: case Keys.Shift | Keys.Left: if (selected == null) break; Nudge(-step, 0); return true;
+                case Keys.Right: case Keys.Shift | Keys.Right: if (selected == null) break; Nudge(step, 0); return true;
+                case Keys.Up: case Keys.Shift | Keys.Up: if (selected == null) break; Nudge(0, -step); return true;
+                case Keys.Down: case Keys.Shift | Keys.Down: if (selected == null) break; Nudge(0, step); return true;
+                case Keys.V: SetTool(Tool.Select); return true;
                 case Keys.B: SetTool(Tool.Box); return true;
                 case Keys.A: SetTool(Tool.Arrow); return true;
+                case Keys.P: SetTool(Tool.Pencil); return true;
                 case Keys.H: SetTool(Tool.Highlight); return true;
                 case Keys.T: SetTool(Tool.Text); return true;
+                case Keys.C: SetTool(Tool.Check); return true;
+                case Keys.X: SetTool(Tool.Cross); return true;
                 case Keys.R: SetTool(Tool.Redact); return true;
-                case Keys.Escape: Close(); return true;
+                case Keys.Escape:
+                    if (selected != null) { Select(null); return true; }
+                    Close();
+                    return true;
             }
             return base.ProcessCmdKey(ref msg, keyData);
         }

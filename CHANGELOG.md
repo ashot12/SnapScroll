@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 (beta)
+
+Editor upgrade.
+
+- **Everything you draw is now an object** you can select, move, recolor or delete until you save. New Select tool (V); freshly drawn objects are selected so you can drag them right away; Del deletes; arrow keys nudge; double-click text to edit it.
+- **Pen (P):** freehand scribbles.
+- **Check (C) and X (X) stamps:** click to place, or drag to size.
+- **Text areas:** drag out an area and type; text wraps inside it, Enter starts a new paragraph.
+- Color, line width and text size apply to the selected object.
+- Undo/redo now covers moves, deletes, edits and recolors.
+- Fixed the Save button icon.
+
 ## 0.1.1 (beta)
 
 Fixes from the first code review.

@@ -57,17 +57,25 @@ Tips:
 
 ### Markup editor
 
+Everything you draw stays a separate object: select it, drag it somewhere else, recolor it or delete it. Only the saved or copied image is flattened.
+
 | Tool | Key | |
 |---|---|---|
+| Select | **V** | Click an object to select it, drag to move, **Del** to delete, arrow keys to nudge (Shift = 10 px). Double-click text to edit it. |
 | Box | **B** | Rectangle outline |
 | Arrow | **A** | Drag from tail to tip |
+| Pen | **P** | Freehand scribble |
 | Highlight | **H** | Yellow see-through marker |
-| Text | **T** | Click, type, Enter (Shift+Enter for a new line) |
+| Text | **T** | Drag an area and type; text wraps inside it. Enter = new line, click outside or Ctrl+Enter = done, Esc = cancel |
+| ✔ Check | **C** | Click to stamp, or drag to size |
+| ✖ X mark | **X** | Click to stamp, or drag to size |
 | Redact | **R** | Solid black box to hide passwords, emails, account numbers |
 
-You can also pick the color, line width and text size from the toolbar.
+- Anything you just drew is selected, so you can drag it straight away.
+- Picking a color, line width or text size changes the selected object.
+- **Esc** deselects, or closes the editor when nothing is selected.
 
-**Ctrl+Z** undo · **Ctrl+Y** redo · **Ctrl+C** copy · **Ctrl+S** save · **Ctrl+Shift+S** save as · **Ctrl +/−/0** zoom · **Esc** close
+**Ctrl+Z** undo (moves and deletes too) · **Ctrl+Y** redo · **Ctrl+C** copy · **Ctrl+S** save · **Ctrl+Shift+S** save as · **Ctrl +/−/0** zoom
 
 ---
 
@@ -77,7 +85,7 @@ You can also pick the color, line width and text size from the toolbar.
 - **PrtSc doesn't work while an app running as Administrator is focused.** Windows blocks this; run SnapScroll as admin if you need it.
 - **Windows 11 Snipping Tool opens instead:** turn off *Settings → Accessibility → Keyboard → "Use the Print screen key to open screen capture"*.
 - **Scrolling capture can lose track** on pages with video, animated ads or content that rearranges itself while scrolling.
-- Shapes can't be moved after drawing yet. Use undo.
+- Objects can be moved but not resized yet.
 
 ## Feedback
 
