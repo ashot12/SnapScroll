@@ -1,0 +1,66 @@
+# Builds SnapScroll.exe on a clean Windows machine from the tagged source and publishes the release.
+# Trigger: push a tag like v0.1.1   (or run it manually from the Actions tab to just get a test build)
+name: Build and release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write        # create the GitHub release
+  id-token: write        # sign the build-provenance attestation
+  attestations: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with the C# compiler that ships with Windows
+        shell: cmd
+        run: build.bat
+
+      - name: Package and hash
+        shell: pwsh
+        run: |
+          $name = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "build-${{ github.run_number }}" }
+          $zip = "SnapScroll-$name.zip"
+          Compress-Archive -Path SnapScroll.exe, README.txt -DestinationPath $zip
+          "ZIP=$zip" >> $env:GITHUB_ENV
+          "EXE_SHA=$((Get-FileHash SnapScroll.exe -Algorithm SHA256).Hash)" >> $env:GITHUB_ENV
+          "ZIP_SHA=$((Get-FileHash $zip -Algorithm SHA256).Hash)" >> $env:GITHUB_ENV
+
+      - name: Attest build provenance (proves this exe was built here, from this commit)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            SnapScroll.exe
+            ${{ env.ZIP }}
+
+      - name: Keep the build as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP }}
+          path: ${{ env.ZIP }}
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = @"
+          Built automatically by GitHub Actions on a clean Windows runner from commit ${{ github.sha }}.
+
+          **SHA-256**
+          - SnapScroll.exe: ``$($env:EXE_SHA)``
+          - $($env:ZIP): ``$($env:ZIP_SHA)``
+
+          Verify the download came from this repo's build:
+          ``gh attestation verify $($env:ZIP) --repo ${{ github.repository }}``
+
+          See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md) for what's new.
+          "@
+          gh release create "${{ github.ref_name }}" "$env:ZIP" --prerelease --title "SnapScroll ${{ github.ref_name }}" --notes "$notes"

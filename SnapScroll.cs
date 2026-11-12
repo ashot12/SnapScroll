@@ -17,9 +17,9 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("SnapScroll")]
 [assembly: AssemblyProduct("SnapScroll")]
-[assembly: AssemblyVersion("0.1.0.0")]
-[assembly: AssemblyFileVersion("0.1.0.0")]
-[assembly: AssemblyInformationalVersion("0.1.0-beta")]
+[assembly: AssemblyVersion("0.1.1.0")]
+[assembly: AssemblyFileVersion("0.1.1.0")]
+[assembly: AssemblyInformationalVersion("0.1.1-beta")]
 
 namespace SnapScroll
 {
@@ -42,7 +42,11 @@ namespace SnapScroll
                 Application.ThreadException += (s, e) =>
                     MessageBox.Show("Something went wrong:\n\n" + e.Exception, "SnapScroll", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 bool silent = args.Length > 0 && args[0].Equals("/silent", StringComparison.OrdinalIgnoreCase);
-                Application.Run(new TrayApp(silent));
+                try { Application.Run(new TrayApp(silent)); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("SnapScroll couldn't start:\n\n" + ex.Message, "SnapScroll", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
                 GC.KeepAlive(mutex);
             }
         }
@@ -61,11 +65,10 @@ namespace SnapScroll
         public struct RECT { public int Left, Top, Right, Bottom; }
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
         public const int WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104;
-        public const int VK_SNAPSHOT = 0x2C, VK_ESCAPE = 0x1B, VK_HOME = 0x24, VK_LWIN = 0x5B, VK_RWIN = 0x5C;
+        public const int VK_SNAPSHOT = 0x2C, VK_ESCAPE = 0x1B, VK_LWIN = 0x5B, VK_RWIN = 0x5C;
         public const uint LLKHF_ALTDOWN = 0x20;
-        public const uint MOUSEEVENTF_WHEEL = 0x0800;
-        public const uint KEYEVENTF_KEYUP = 0x0002;
         public const uint WDA_EXCLUDEFROMCAPTURE = 0x11;
+        public const uint WM_QUIT = 0x0012, WM_APP = 0x8000;
 
         public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -80,9 +83,14 @@ namespace SnapScroll
         [DllImport("user32.dll")] public static extern bool UnhookWindowsHookEx(IntPtr hhk);
         [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandle(string name);
-        [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-        [DllImport("user32.dll")] public static extern void mouse_event(uint flags, int dx, int dy, int data, UIntPtr extra);
-        [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public POINT pt; }
+        [DllImport("user32.dll")] public static extern int GetMessage(out MSG msg, IntPtr hwnd, uint min, uint max);
+        [DllImport("user32.dll")] public static extern bool PeekMessage(out MSG msg, IntPtr hwnd, uint min, uint max, uint remove);
+        [DllImport("user32.dll")] public static extern bool TranslateMessage(ref MSG msg);
+        [DllImport("user32.dll")] public static extern IntPtr DispatchMessage(ref MSG msg);
+        [DllImport("user32.dll")] public static extern bool PostThreadMessage(uint threadId, uint msg, IntPtr w, IntPtr l);
+        [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vk);
         [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
         [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
@@ -213,8 +221,9 @@ namespace SnapScroll
             using (var dlg = new SaveFileDialog())
             {
                 dlg.Filter = "PNG image|*.png|JPEG image|*.jpg|Bitmap|*.bmp";
-                dlg.InitialDirectory = Settings.SaveFolder;
-                dlg.FileName = Path.GetFileName(Settings.NewFilePath(".png"));
+                string folder = Settings.SaveFolder;
+                dlg.InitialDirectory = Directory.Exists(folder) ? folder : Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
+                dlg.FileName = "Screenshot_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + ".png";
                 dlg.AddExtension = true;
                 if (dlg.ShowDialog(owner) != DialogResult.OK) return null;
                 Save(img, dlg.FileName);
@@ -235,7 +244,15 @@ namespace SnapScroll
 
     static class AppInfo
     {
-        public const string Version = "0.1.0 beta";
+        // Single source of truth: the AssemblyInformationalVersion attribute at the top of this file.
+        public static readonly string Version = ReadVersion();
+
+        static string ReadVersion()
+        {
+            var a = (AssemblyInformationalVersionAttribute)Attribute.GetCustomAttribute(
+                Assembly.GetExecutingAssembly(), typeof(AssemblyInformationalVersionAttribute));
+            return a != null ? a.InformationalVersion.Replace('-', ' ') : "dev";
+        }
     }
 
     static class AppIcon
@@ -255,6 +272,73 @@ namespace SnapScroll
         public static Icon Large { get { if (large == null) large = Load(SystemInformation.IconSize); return large; } }
     }
 
+    // ------------------------------------------------------------ Hook thread
+    // Low-level hooks must answer within a few hundred milliseconds or Windows silently removes
+    // them. So they live on their own thread that does nothing but pump messages; capture,
+    // clipboard and saving happen elsewhere and can never make PrtSc stop working.
+    class HookThread
+    {
+        const uint MSG_MOUSE_ON = Native.WM_APP + 1, MSG_MOUSE_OFF = Native.WM_APP + 2;
+        readonly Native.LowLevelKeyboardProc keyProc, mouseProc;
+        readonly ManualResetEvent ready = new ManualResetEvent(false);
+        volatile uint threadId;
+        public volatile bool KeyboardHooked;
+
+        public HookThread(Native.LowLevelKeyboardProc keyProc, Native.LowLevelKeyboardProc mouseProc)
+        {
+            this.keyProc = keyProc;
+            this.mouseProc = mouseProc;
+        }
+
+        public void Start()
+        {
+            var t = new Thread(Loop);
+            t.IsBackground = true;
+            t.Name = "SnapScroll hooks";
+            t.Start();
+            ready.WaitOne(5000);
+        }
+
+        void Loop()
+        {
+            IntPtr mod;
+            using (var p = Process.GetCurrentProcess())
+            using (var m = p.MainModule)
+                mod = Native.GetModuleHandle(m.ModuleName);
+
+            Native.MSG msg;
+            Native.PeekMessage(out msg, IntPtr.Zero, 0, 0, 0);   // creates this thread's message queue
+            threadId = Native.GetCurrentThreadId();
+            IntPtr keyHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, keyProc, mod, 0);
+            IntPtr mouseHook = IntPtr.Zero;
+            KeyboardHooked = keyHook != IntPtr.Zero;
+            ready.Set();
+
+            while (Native.GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
+            {
+                if (msg.hwnd == IntPtr.Zero && msg.message == MSG_MOUSE_ON)
+                {
+                    if (mouseHook == IntPtr.Zero) mouseHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, mouseProc, mod, 0);
+                    continue;
+                }
+                if (msg.hwnd == IntPtr.Zero && msg.message == MSG_MOUSE_OFF)
+                {
+                    if (mouseHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
+                    continue;
+                }
+                Native.TranslateMessage(ref msg);
+                Native.DispatchMessage(ref msg);
+            }
+            if (mouseHook != IntPtr.Zero) Native.UnhookWindowsHookEx(mouseHook);
+            if (keyHook != IntPtr.Zero) Native.UnhookWindowsHookEx(keyHook);
+        }
+
+        void Post(uint m) { if (threadId != 0) Native.PostThreadMessage(threadId, m, IntPtr.Zero, IntPtr.Zero); }
+        public void MouseOn() { Post(MSG_MOUSE_ON); }
+        public void MouseOff() { Post(MSG_MOUSE_OFF); }
+        public void Stop() { Post(Native.WM_QUIT); }
+    }
+
     // --------------------------------------------------------------- Tray app
     enum CaptureAction { None, CopySave, Copy, SaveAs, Edit, Scroll }
 
@@ -262,16 +346,14 @@ namespace SnapScroll
     {
         readonly NotifyIcon tray;
         readonly Control ui;
-        readonly Native.LowLevelKeyboardProc hookProc;
-        IntPtr hook = IntPtr.Zero;
+        readonly HookThread hooks;
         bool busy;
         string lastSaved;
-        OverlayForm overlay;
-        ScrollSession scroll;
+        // Read by the hook thread, so volatile.
+        volatile OverlayForm overlay;
+        volatile ScrollSession scroll;
+        volatile bool swallowUp;
         ScrollIndicator scrollIndicator;
-        readonly Native.LowLevelKeyboardProc mouseProc;
-        IntPtr mouseHook = IntPtr.Zero;
-        bool swallowUp;
 
         public TrayApp(bool silent)
         {
@@ -306,13 +388,10 @@ namespace SnapScroll
             tray.BalloonTipClicked += delegate { if (lastSaved != null) ImageUtil.ShowInFolder(lastSaved); };
             tray.Visible = true;
 
-            hookProc = HookCallback;
-            mouseProc = MouseCallback;
-            using (var p = Process.GetCurrentProcess())
-            using (var m = p.MainModule)
-                hook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, hookProc, Native.GetModuleHandle(m.ModuleName), 0);
+            hooks = new HookThread(HookCallback, MouseCallback);
+            hooks.Start();
 
-            if (hook == IntPtr.Zero)
+            if (!hooks.KeyboardHooked)
                 tray.ShowBalloonTip(5000, "SnapScroll", "Couldn't hook the PrtSc key. Double-click the tray icon to capture instead.", ToolTipIcon.Warning);
             else if (!silent)
                 tray.ShowBalloonTip(3000, "SnapScroll is running", "Press PrtSc to capture. Right-click the tray icon for options.", ToolTipIcon.Info);
@@ -320,8 +399,7 @@ namespace SnapScroll
 
         protected override void ExitThreadCore()
         {
-            if (hook != IntPtr.Zero) { Native.UnhookWindowsHookEx(hook); hook = IntPtr.Zero; }
-            UnhookMouse();
+            hooks.Stop();
             tray.Visible = false;
             tray.Dispose();
             base.ExitThreadCore();
@@ -370,7 +448,7 @@ namespace SnapScroll
                     return (IntPtr)1;
                 }
             }
-            return Native.CallNextHookEx(hook, nCode, wParam, lParam);
+            return Native.CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
         }
 
         void BeginCapture()
@@ -382,22 +460,25 @@ namespace SnapScroll
             try { shot = ImageUtil.Capture(vs); }
             catch (Exception ex) { busy = false; Warn("Capture failed: " + ex.Message); return; }
 
-            var ov = new OverlayForm(shot, vs);
+            OverlayForm ov;
+            try { ov = new OverlayForm(shot, vs); }
+            catch (Exception ex) { shot.Dispose(); busy = false; Warn("Capture failed: " + ex.Message); return; }
             overlay = ov;
             ov.FormClosed += delegate
             {
                 overlay = null;
                 CaptureAction a = ov.Action;
-                Rectangle r = ov.ScreenRect;
                 Bitmap crop = ov.Crop;
+                string err = ov.Error;
                 shot.Dispose();
-                ui.BeginInvoke((MethodInvoker)delegate { HandleResult(a, r, crop); });
+                if (err != null) Warn("Capture failed: " + err);
+                ui.BeginInvoke((MethodInvoker)delegate { HandleResult(a, crop); });
             };
-            ov.Show();
-            ov.Activate();
+            try { ov.Show(); ov.Activate(); }
+            catch (Exception ex) { overlay = null; busy = false; Warn("Capture failed: " + ex.Message); }
         }
 
-        void HandleResult(CaptureAction a, Rectangle r, Bitmap crop)
+        void HandleResult(CaptureAction a, Bitmap crop)
         {
             try
             {
@@ -429,15 +510,15 @@ namespace SnapScroll
                             ShowFront(ed);
                             break;
                         }
-                    case CaptureAction.Scroll:
-                        busy = false;
-                        StartScrollMode();
-                        return;
                 }
             }
             catch (Exception ex) { MessageBox.Show("Something went wrong:\n\n" + ex, "SnapScroll", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-            finally { if (crop != null) crop.Dispose(); }
-            busy = false;
+            finally
+            {
+                if (crop != null) crop.Dispose();
+                busy = false;
+            }
+            if (a == CaptureAction.Scroll) StartScrollMode();
         }
 
         // ---- Scrolling capture: click top-left, scroll, click bottom-right.
@@ -451,10 +532,7 @@ namespace SnapScroll
             swallowUp = false;
             scrollIndicator = new ScrollIndicator(ss);
             scrollIndicator.Show();
-            using (var p = Process.GetCurrentProcess())
-            using (var m = p.MainModule)
-                mouseHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, mouseProc, Native.GetModuleHandle(m.ModuleName), 0);
-            if (mouseHook == IntPtr.Zero) { EndScrollMode(); Warn("Couldn't start scrolling capture (mouse hook failed)."); }
+            hooks.MouseOn();
         }
 
         void CancelScroll()
@@ -539,17 +617,14 @@ namespace SnapScroll
                 if (swallowUp && (msg == Native.WM_LBUTTONUP || msg == Native.WM_RBUTTONUP))
                 {
                     swallowUp = false;
-                    if (scroll == null) ui.BeginInvoke((MethodInvoker)UnhookMouse);
+                    if (scroll == null) hooks.MouseOff();
                     return (IntPtr)1;
                 }
             }
-            return Native.CallNextHookEx(mouseHook, nCode, wParam, lParam);
+            return Native.CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
         }
 
-        void UnhookMouse()
-        {
-            if (mouseHook != IntPtr.Zero) { Native.UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
-        }
+        void UnhookMouse() { hooks.MouseOff(); }
 
         static void ShowFront(Form f)
         {
@@ -585,8 +660,8 @@ namespace SnapScroll
         bool dragging, menuChose, finished;
 
         public CaptureAction Action = CaptureAction.None;
-        public Rectangle ScreenRect;
         public Bitmap Crop;
+        public string Error;
 
         public OverlayForm(Bitmap shot, Rectangle vs)
         {
@@ -668,15 +743,28 @@ namespace SnapScroll
         {
             if (finished) return;
             finished = true;
-            Action = a;
-            if (a == CaptureAction.Scroll) { }
-            else if (a != CaptureAction.None && sel.Width > 0 && sel.Height > 0)
+            try
             {
-                ScreenRect = new Rectangle(sel.X + vs.X, sel.Y + vs.Y, sel.Width, sel.Height);
-                Crop = ImageUtil.Crop(shot, sel);
+                Action = a;
+                if (a == CaptureAction.Scroll) { }
+                else if (a != CaptureAction.None)
+                {
+                    Rectangle r = Rectangle.Intersect(sel, new Rectangle(0, 0, shot.Width, shot.Height));
+                    if (r.Width > 0 && r.Height > 0) Crop = ImageUtil.Crop(shot, r);
+                    else Action = CaptureAction.None;
+                }
             }
-            else Action = CaptureAction.None;
-            BeginInvoke((MethodInvoker)Close);
+            catch (Exception ex)
+            {
+                Action = CaptureAction.None;
+                if (Crop != null) { Crop.Dispose(); Crop = null; }
+                Error = ex.Message;
+            }
+            finally
+            {
+                // Always close, so the overlay can never be left swallowing keys.
+                try { BeginInvoke((MethodInvoker)Close); } catch { Close(); }
+            }
         }
 
         public void StartScrolling()
@@ -791,6 +879,7 @@ namespace SnapScroll
         public volatile int Phase;          // 1 = waiting for top-left click, 2 = scrolling, 3 = finishing
         public volatile bool Stop, Cancel, Lost, Scrolled, HasP2;
         public volatile int Height;
+        public volatile int Frames;         // frames examined (diagnostics)
         public Point P1, P2;
     }
 
@@ -893,26 +982,29 @@ namespace SnapScroll
             int best = -1;
             double bestErr = double.MaxValue;
             int minRows = Math.Max(60, (m1 - m0) * 55 / 100);   // demand a solid overlap: thin slivers can fool us
+            int cap = K * 25;   // one row can only count so much: a local animation can't veto a clear match
             for (int s = 1; ; s++)
             {
                 int rEnd = Math.Min(m1, c1 - s);
                 int rows = rEnd - m0;
                 if (rows < minRows) break;
-                int maxBad = rows * 12 / 100 + 2, used = 0, nbad = 0;
-                long sad = 0;
+                int maxBad = rows / 4 + 2, used = 0, nbad = 0;   // a local animation may spoil up to a quarter of rows
+                long sum = 0;
                 for (int r = m0; r < rEnd; r++)
                 {
                     if (!prev.Tex[r + s] && !cur.Tex[r]) continue;
                     bool rb;
-                    sad += RowSad(prev, r + s, cur, r, out rb);
+                    int d = RowSad(prev, r + s, cur, r, out rb);
+                    sum += d < cap ? d : cap;
                     used++;
                     if (rb && ++nbad > maxBad) break;
                 }
                 if (nbad > maxBad || used < 20) continue;
-                double err = sad / (double)used;
+                double err = sum / (double)used;
                 if (err < bestErr - 0.01) { bestErr = err; best = s; }
             }
-            return best;
+            // Reject a "best" that still isn't a real match (a few levels of noise per sample at most).
+            return bestErr <= K * 10 ? best : -1;
         }
 
         public static Bitmap Run(Rectangle watch, ScrollSession ss, out string message)
@@ -961,6 +1053,7 @@ namespace SnapScroll
                     else Thread.Sleep(15);
 
                     Frame cur = Grab(watch, cols);
+                    ss.Frames++;
                     if (Same(prev, cur)) { cur.Bmp.Dispose(); continue; }
 
                     int t, b;
@@ -1112,6 +1205,8 @@ namespace SnapScroll
             timer.Stop();
             timer.Dispose();
             foreach (var c in corner) c.Close();
+            big.Dispose();
+            small.Dispose();
             base.OnFormClosed(e);
         }
 
@@ -1406,9 +1501,10 @@ namespace SnapScroll
             fitWidth = fit;
             if (fit)
             {
-                int avail = host.ClientSize.Width - (img.Height * zoom > host.ClientSize.Height ? 0 : SystemInformation.VerticalScrollBarWidth) - 2;
-                if (avail < 50) avail = 50;
-                z = Math.Min(1f, avail / (float)img.Width);
+                int full = Math.Max(50, host.Width - 2);
+                z = Math.Min(1f, full / (float)img.Width);
+                if (img.Height * z > host.Height)   // a vertical scrollbar will appear: leave room for it
+                    z = Math.Min(1f, Math.Max(50, full - SystemInformation.VerticalScrollBarWidth) / (float)img.Width);
             }
             z = Math.Max(0.05f, Math.Min(4f, z));
             zoom = z;
@@ -1527,15 +1623,33 @@ namespace SnapScroll
                 case Tool.Text:
                     g.SmoothingMode = SmoothingMode.AntiAlias;
                     using (var path = new GraphicsPath())
-                    using (var ff = new FontFamily("Segoe UI"))
                     {
-                        path.AddString(s.Text, ff, (int)FontStyle.Bold, s.FontSize, s.A, StringFormat.GenericDefault);
+                        string[] lines = s.Text.Split('\n');
+                        float lineH = s.FontSize * 1.3f;
+                        for (int i = 0; i < lines.Length; i++)
+                            if (lines[i].Length > 0)
+                                path.AddString(lines[i], TextFamily, (int)FontStyle.Bold, s.FontSize,
+                                               new PointF(s.A.X, s.A.Y + i * lineH), StringFormat.GenericDefault);
                         Color outline = IsLight(s.Color) ? Color.FromArgb(40, 40, 40) : Color.White;
                         using (var op = new Pen(outline, Math.Max(2.5f, s.FontSize / 6f)) { LineJoin = LineJoin.Round })
                             g.DrawPath(op, path);
                         using (var br = new SolidBrush(s.Color)) g.FillPath(br, path);
                     }
                     break;
+            }
+        }
+
+        static FontFamily textFamily;
+        static FontFamily TextFamily
+        {
+            get
+            {
+                if (textFamily == null)
+                {
+                    try { textFamily = new FontFamily("Segoe UI"); }
+                    catch { textFamily = FontFamily.GenericSansSerif; }
+                }
+                return textFamily;
             }
         }
 
@@ -1718,6 +1832,7 @@ namespace SnapScroll
                 case Keys.Control | Keys.S: Save(); return true;
                 case Keys.Control | Keys.Shift | Keys.S: SaveAs(); return true;
                 case Keys.Control | Keys.Oemplus:
+                case Keys.Control | Keys.Shift | Keys.Oemplus:
                 case Keys.Control | Keys.Add: StepZoom(1); return true;
                 case Keys.Control | Keys.OemMinus:
                 case Keys.Control | Keys.Subtract: StepZoom(-1); return true;

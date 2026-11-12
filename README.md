@@ -4,7 +4,7 @@
 
 One ~80 KB exe. No installer, no dependencies (it uses the .NET Framework that's already built into Windows), no internet access, no telemetry.
 
-> **Beta (v0.1).** This is an early test release. Things may break; please [report anything odd](../../issues).
+> **Beta (v0.1.x).** This is an early test release. Things may break; please [report anything odd](../../issues).
 
 <!-- Add a screenshot or GIF here once you have one, e.g.:
 ![SnapScroll in action](docs/demo.gif)
@@ -16,9 +16,12 @@ One ~80 KB exe. No installer, no dependencies (it uses the .NET Framework that's
 
 Grab the latest `SnapScroll-vX.Y.Z.zip` from the **[Releases page](../../releases)**, unzip it anywhere, and run `SnapScroll.exe`. It sits in the system tray (blue icon).
 
-### "Windows protected your PC"?
+### Is the download safe?
 
-SnapScroll isn't code-signed yet, so Windows SmartScreen doesn't recognize it. Click **More info → Run anyway**. If you'd rather not trust a downloaded exe, [build it yourself](#build-from-source) in about five seconds; the full source is in this repo.
+- **Built in public:** every release is compiled by [GitHub Actions](../../actions) on a clean Windows machine, straight from the source in this repo.
+- **Checkable:** the release notes list the SHA-256 hash of the exe and zip. You can confirm a download really came from that build with `gh attestation verify SnapScroll-vX.Y.Z.zip --repo ashot12/SnapScroll`.
+- **Small footprint:** no network access, no telemetry, never asks for admin. See [SECURITY.md](SECURITY.md) for exactly what it touches.
+- **Unsigned for now:** the exe isn't code-signed yet, so Windows SmartScreen will say it doesn't recognize the app. Once you're comfortable, choose **More info → Run anyway**. Or skip the download and [build it yourself](#build-from-source); it takes about five seconds.
 
 ---
 
@@ -70,7 +73,7 @@ You can also pick the color, line width and text size from the toolbar.
 
 ## Known limitations (v0.1)
 
-- **SmartScreen warning** on first run (unsigned exe, see above).
+- **SmartScreen warning** on first run (unsigned exe; see [Is the download safe?](#is-the-download-safe)).
 - **PrtSc doesn't work while an app running as Administrator is focused.** Windows blocks this; run SnapScroll as admin if you need it.
 - **Windows 11 Snipping Tool opens instead:** turn off *Settings → Accessibility → Keyboard → "Use the Print screen key to open screen capture"*.
 - **Scrolling capture can lose track** on pages with video, animated ads or content that rearranges itself while scrolling.
@@ -98,6 +101,9 @@ It compiles `SnapScroll.cs` with the C# compiler that ships with Windows (`csc.e
 |---|---|
 | `SnapScroll.cs` | The whole app (tray, capture overlay, scrolling capture, editor) |
 | `app.ico` | App icon |
+| `app.manifest` | Windows settings: per-monitor DPI awareness, runs without admin |
 | `build.bat` | One-step build |
 | `README.txt` | Plain-text user guide (ships inside the release zip) |
 | `CHANGELOG.md` | Version history |
+| `SECURITY.md` | What the app touches, and how to report a problem |
+| `.github/workflows/release.yml` | Builds and publishes a release when a `v*` tag is pushed |
