@@ -37,6 +37,7 @@ EDITOR (markup)
   Everything you draw stays a separate object until you save/copy: select it,
   drag it, recolor it or delete it.
   V  Select      click to select, drag to move, Del to delete, arrows to nudge
+                 drag the handles to resize (Shift on a corner keeps proportions)
                  double-click text to edit it
   B  Box         A  Arrow       P  Pen (freehand)      H  Highlight (yellow)
   T  Text        drag an area and type; it wraps inside. Enter = new line,

@@ -17,9 +17,9 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("SnapScroll")]
 [assembly: AssemblyProduct("SnapScroll")]
-[assembly: AssemblyVersion("0.2.0.0")]
-[assembly: AssemblyFileVersion("0.2.0.0")]
-[assembly: AssemblyInformationalVersion("0.2.0-beta")]
+[assembly: AssemblyVersion("0.3.0.0")]
+[assembly: AssemblyFileVersion("0.3.0.0")]
+[assembly: AssemblyInformationalVersion("0.3.0-beta")]
 
 namespace SnapScroll
 {
@@ -1322,6 +1322,9 @@ namespace SnapScroll
         Shape cur;                    // shape being drawn
         Shape selected;               // selected object (movable / deletable)
         bool moving, moved;
+        bool resizing;
+        int resizeHandle;             // 0-7 = TL,T,TR,R,BR,B,BL,L of the box; 10 = arrow tail, 11 = arrow tip
+        Shape resizeOrig;             // the object as it was when the resize started
         Point moveLast;
         List<Shape> preMove;          // undo snapshot taken when a move starts
 
@@ -1838,7 +1841,11 @@ namespace SnapScroll
                 if (cur.Kind == Tool.Text) DrawDashed(g, Rect(cur.A, cur.B), Color.FromArgb(0, 120, 215));
                 else DrawShape(g, cur);
             }
-            if (selected != null && selected != editShape) DrawDashed(g, SelRect(selected), Color.FromArgb(0, 120, 215));
+            if (selected != null && selected != editShape)
+            {
+                DrawDashed(g, SelRect(selected), Color.FromArgb(0, 120, 215));
+                DrawHandles(g, selected);
+            }
         }
 
         void DrawDashed(Graphics g, Rectangle r, Color c)
@@ -1990,12 +1997,145 @@ namespace SnapScroll
 
         static bool IsLight(Color c) { return (c.R * 0.299 + c.G * 0.587 + c.B * 0.114) > 160; }
 
+        // ---- resize handles
+        static bool IsStamp(Shape s) { return s.Kind == Tool.Check || s.Kind == Tool.Cross; }
+
+        static List<KeyValuePair<int, Point>> Handles(Shape s)
+        {
+            var h = new List<KeyValuePair<int, Point>>();
+            if (s.Kind == Tool.Arrow)
+            {
+                h.Add(new KeyValuePair<int, Point>(10, s.A));
+                h.Add(new KeyValuePair<int, Point>(11, s.B));
+                return h;
+            }
+            Rectangle r = GeomRect(s);
+            int cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
+            Point[] pts = {
+                new Point(r.Left, r.Top), new Point(cx, r.Top), new Point(r.Right, r.Top), new Point(r.Right, cy),
+                new Point(r.Right, r.Bottom), new Point(cx, r.Bottom), new Point(r.Left, r.Bottom), new Point(r.Left, cy) };
+            for (int i = 0; i < 8; i++)
+                if (!IsStamp(s) || i % 2 == 0)   // stamps stay square: corners only
+                    h.Add(new KeyValuePair<int, Point>(i, pts[i]));
+            return h;
+        }
+
+        void DrawHandles(Graphics g, Shape s)
+        {
+            g.SmoothingMode = SmoothingMode.None;
+            float hs = 7f / zoom;
+            using (var pen = new Pen(Color.FromArgb(0, 120, 215), 1.2f / zoom))
+                foreach (var kv in Handles(s))
+                {
+                    var r = new RectangleF(kv.Value.X - hs / 2, kv.Value.Y - hs / 2, hs, hs);
+                    g.FillRectangle(Brushes.White, r);
+                    g.DrawRectangle(pen, r.X, r.Y, r.Width, r.Height);
+                }
+        }
+
+        // Handle under a canvas (screen) point, or -1.
+        int HandleAt(Point canvasPt)
+        {
+            if (selected == null || editBox != null) return -1;
+            foreach (var kv in Handles(selected))
+            {
+                float x = kv.Value.X * zoom, y = kv.Value.Y * zoom;
+                if (Math.Abs(canvasPt.X - x) <= 6 && Math.Abs(canvasPt.Y - y) <= 6) return kv.Key;
+            }
+            return -1;
+        }
+
+        static Cursor HandleCursor(int h)
+        {
+            switch (h)
+            {
+                case 0: case 4: return Cursors.SizeNWSE;
+                case 2: case 6: return Cursors.SizeNESW;
+                case 1: case 5: return Cursors.SizeNS;
+                case 3: case 7: return Cursors.SizeWE;
+                default: return Cursors.SizeAll;
+            }
+        }
+
+        void ApplyResize(Point p, bool keepAspect)
+        {
+            Shape o = resizeOrig, s = selected;
+            if (o.Kind == Tool.Arrow)
+            {
+                if (resizeHandle == 10) s.A = p; else s.B = p;
+                return;
+            }
+            Rectangle r = GeomRect(o);
+            int l = r.Left, t = r.Top, rt = r.Right, b = r.Bottom;
+            int h = resizeHandle;
+            if (h == 0 || h == 6 || h == 7) l = p.X;
+            if (h == 2 || h == 3 || h == 4) rt = p.X;
+            if (h == 0 || h == 1 || h == 2) t = p.Y;
+            if (h == 4 || h == 5 || h == 6) b = p.Y;
+
+            bool corner = h % 2 == 0;
+            if (corner && (keepAspect || IsStamp(o)) && r.Width > 0 && r.Height > 0)
+            {
+                // Scale from the opposite corner, keeping the original proportions.
+                int ax = (h == 0 || h == 6) ? r.Right : r.Left;
+                int ay = (h == 0 || h == 2) ? r.Bottom : r.Top;
+                int mx = (h == 0 || h == 6) ? l : rt, my = (h == 0 || h == 2) ? t : b;
+                double sc = Math.Max(Math.Abs(mx - ax) / (double)r.Width, Math.Abs(my - ay) / (double)r.Height);
+                int nw = (int)Math.Round(r.Width * sc), nh = (int)Math.Round(r.Height * sc);
+                int sx = mx < ax ? -1 : 1, sy = my < ay ? -1 : 1;
+                mx = ax + sx * nw; my = ay + sy * nh;
+                if (h == 0 || h == 6) { l = mx; rt = ax; } else { rt = mx; l = ax; }
+                if (h == 0 || h == 2) { t = my; b = ay; } else { b = my; t = ay; }
+            }
+
+            if (o.Kind == Tool.Pencil)
+            {
+                // Stretch the stroke to the new box (dragging past the far side mirrors it).
+                double fx = r.Width > 0 ? (rt - l) / (double)r.Width : 1, fy = r.Height > 0 ? (b - t) / (double)r.Height : 1;
+                for (int i = 0; i < o.Pts.Count; i++)
+                    s.Pts[i] = new Point(l + (int)Math.Round((o.Pts[i].X - r.X) * fx), t + (int)Math.Round((o.Pts[i].Y - r.Y) * fy));
+                Rectangle pr = GeomRect(s);
+                s.A = pr.Location;
+                s.B = new Point(pr.Right, pr.Bottom);
+                return;
+            }
+
+            Rectangle nr = Rectangle.FromLTRB(Math.Min(l, rt), Math.Min(t, b), Math.Max(l, rt), Math.Max(t, b));
+            if (o.Kind == Tool.Text)
+            {
+                // Width = where the text wraps. Height can't go below what the text needs.
+                if (nr.Width < 20) nr.Width = 20;
+                s.A = nr.Location;
+                s.AreaH = (h == 3 || h == 7) ? o.AreaH : nr.Height;
+                s.B = new Point(nr.Right, nr.Y);
+                UpdateTextBounds(s);
+                return;
+            }
+            if (nr.Width < 4) nr.Width = 4;
+            if (nr.Height < 4) nr.Height = 4;
+            s.A = nr.Location;
+            s.B = new Point(nr.Right, nr.Bottom);
+        }
+
         // ---- mouse
         void Canvas_MouseDown(object sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left) return;
             if (editBox != null) { CommitText(); return; }
             Point p = ToImg(e.Location);
+
+            // Grabbing a handle of the selected object: resize it.
+            int handle = HandleAt(e.Location);
+            if (handle >= 0)
+            {
+                resizing = true;
+                resizeHandle = handle;
+                resizeOrig = selected.Clone();
+                moved = false;
+                preMove = CloneList(shapes);
+                return;
+            }
+
             Shape hit = HitTest(p);
 
             // Select tool, or grabbing the object that's already selected: select / move.
@@ -2024,6 +2164,14 @@ namespace SnapScroll
         void Canvas_MouseMove(object sender, MouseEventArgs e)
         {
             Point p = ToImg(e.Location);
+            if (resizing && selected != null)
+            {
+                Rectangle before = CanvasBounds(selected);
+                ApplyResize(p, (Control.ModifierKeys & Keys.Shift) != 0);
+                moved = true;
+                canvas.Invalidate(Rectangle.Union(before, CanvasBounds(selected)));
+                return;
+            }
             if (moving && selected != null)
             {
                 int dx = p.X - moveLast.X, dy = p.Y - moveLast.Y;
@@ -2049,7 +2197,9 @@ namespace SnapScroll
             }
             if (editBox != null || e.Button != MouseButtons.None) return;
 
-            // Hover feedback: a move cursor over things you can drag.
+            // Hover feedback: resize cursors on handles, a move cursor over things you can drag.
+            int hh = HandleAt(e.Location);
+            if (hh >= 0) { Cursor hc = HandleCursor(hh); if (canvas.Cursor != hc) canvas.Cursor = hc; return; }
             Shape hit = HitTest(p);
             Cursor want = ToolCursor();
             if (hit != null && (tool == Tool.Select || hit == selected)) want = Cursors.SizeAll;
@@ -2059,6 +2209,15 @@ namespace SnapScroll
 
         void Canvas_MouseUp(object sender, MouseEventArgs e)
         {
+            if (resizing)
+            {
+                resizing = false;
+                if (moved) PushUndoSnapshot(preMove);
+                preMove = null;
+                resizeOrig = null;
+                InvalidateVisible();
+                return;
+            }
             if (moving)
             {
                 moving = false;

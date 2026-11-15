@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 (beta)
+
+- **Resize anything.** A selected object shows handles: drag them to fine-tune its size.
+  - Boxes, highlights, redacts, pen strokes: 8 handles (corners and edges).
+  - Text areas: drag the sides to change where the text wraps; it re-flows as you drag.
+  - ✔ / ✖ stamps: corner handles, always stay square.
+  - Arrows: a handle on each end to move the tail or the tip.
+  - Hold **Shift** while dragging a corner to keep the proportions.
+- Resizes can be undone like everything else.
+
 ## 0.2.0 (beta)
 
 Editor upgrade.

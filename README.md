@@ -57,7 +57,7 @@ Tips:
 
 ### Markup editor
 
-Everything you draw stays a separate object: select it, drag it somewhere else, recolor it or delete it. Only the saved or copied image is flattened.
+Everything you draw stays a separate object: select it, drag it somewhere else, resize it, recolor it or delete it. Only the saved or copied image is flattened.
 
 | Tool | Key | |
 |---|---|---|
@@ -72,6 +72,7 @@ Everything you draw stays a separate object: select it, drag it somewhere else, 
 | Redact | **R** | Solid black box to hide passwords, emails, account numbers |
 
 - Anything you just drew is selected, so you can drag it straight away.
+- Drag the **handles** of a selected object to resize it (Shift on a corner keeps proportions). For text, the sides set where it wraps; for arrows, the handles move the tail and tip.
 - Picking a color, line width or text size changes the selected object.
 - **Esc** deselects, or closes the editor when nothing is selected.
 
@@ -85,7 +86,6 @@ Everything you draw stays a separate object: select it, drag it somewhere else, 
 - **PrtSc doesn't work while an app running as Administrator is focused.** Windows blocks this; run SnapScroll as admin if you need it.
 - **Windows 11 Snipping Tool opens instead:** turn off *Settings → Accessibility → Keyboard → "Use the Print screen key to open screen capture"*.
 - **Scrolling capture can lose track** on pages with video, animated ads or content that rearranges itself while scrolling.
-- Objects can be moved but not resized yet.
 
 ## Feedback
 
